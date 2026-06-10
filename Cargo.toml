@@ -1,0 +1,26 @@
+[package]
+name = "searchlight"
+version = "0.1.0"
+edition = "2021"
+description = "A high-performance full-text search library with Chinese/English support, fuzzy matching, pinyin search, and batch retrieval"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+serde = ["dep:serde"]
+wasm = ["serde", "dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+
+[dependencies]
+aho-corasick = "1.1"
+pinyin = "0.10"
+unicode-segmentation = "1.12"
+serde = { version = "1", features = ["derive"], optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
