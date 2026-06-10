@@ -11,9 +11,9 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
+    "@luhanxin/searchlight": "workspace:^",
     "react": "^19.2.6",
-    "react-dom": "^19.2.6",
-    "searchlight": "file:../../pkg"
+    "react-dom": "^19.2.6"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

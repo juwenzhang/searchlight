@@ -1,0 +1,40 @@
+{
+  "name": "@luhanxin/searchlight-react",
+  "version": "0.1.0",
+  "description": "Reusable React hooks for @luhanxin/searchlight WebAssembly local search.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "@luhanxin/searchlight": "^0.1.0",
+    "react": ">=18.0.0 || >=19.0.0"
+  },
+  "devDependencies": {
+    "@luhanxin/searchlight": "workspace:^",
+    "@types/react": "^19.2.14",
+    "tsup": "^8.5.0",
+    "typescript": "~6.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

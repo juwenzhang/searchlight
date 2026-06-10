@@ -96,7 +96,7 @@ export type SearchOptions = {
 ### 3. 本地 WASM Provider
 
 ```ts
-import init, { SearchEngine } from 'searchlight';
+import init, { SearchEngine } from '@luhanxin/searchlight';
 import type { SearchOptions, SearchResult } from './types';
 
 export class LocalSearchProvider {
@@ -333,7 +333,7 @@ npm install ../searchlight/pkg
 ```
 
 ```ts
-import init, { SearchEngine } from 'searchlight';
+import init, { SearchEngine } from '@luhanxin/searchlight';
 
 await init();
 const engine = new SearchEngine();

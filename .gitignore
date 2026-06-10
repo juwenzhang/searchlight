@@ -2,3 +2,4 @@
 # /pkg
 node_modules
 examples/react-web/dist
+packages/react-hooks/dist

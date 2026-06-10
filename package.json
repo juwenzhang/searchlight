@@ -1,0 +1,12 @@
+{
+  "name": "searchlight-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.24.0",
+  "scripts": {
+    "build:wasm": "./scripts/build-react-wasm.sh",
+    "build:react-hooks": "pnpm --filter @luhanxin/searchlight-react build",
+    "build": "pnpm build:wasm && pnpm build:react-hooks",
+    "typecheck": "pnpm --filter @luhanxin/searchlight-react typecheck"
+  }
+}

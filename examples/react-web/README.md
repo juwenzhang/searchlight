@@ -8,7 +8,7 @@ pnpm create vite@latest examples/react-web --template react-ts
 
 随后只做了三类改动：
 
-1. 在 `package.json` 中添加 `searchlight: file:../../pkg`。
+1. 在 `package.json` 中添加 `@luhanxin/searchlight: workspace:^`。
 2. 添加 `src/search.ts`、`src/data.ts`，封装本地 WASM 搜索和远程 API 搜索。
 3. 替换 `src/App.tsx` 和 `src/App.css`，做成可交互搜索页面。
 
@@ -19,20 +19,20 @@ pnpm create vite@latest examples/react-web --template react-ts
 ```bash
 cargo install wasm-bindgen-cli --version 0.2.123 --locked
 rustup target add wasm32-unknown-unknown
-./scripts/build-react-wasm.sh
-cd examples/react-web
 pnpm install
-pnpm dev
+pnpm build:wasm
+pnpm --filter searchlight-react-web dev
 ```
 
 ## 从零接入到你的 React 项目
 
+已发布包：
+
 ```bash
-pnpm create vite@latest react-web --template react-ts
-cd react-web
-pnpm install
-pnpm add ../searchlight/pkg
+pnpm add @luhanxin/searchlight
 ```
+
+仓库内联调使用根目录的 `pnpm-workspace.yaml`，示例应用通过 `workspace:^` 依赖 `pkg` 包。
 
 然后参考：
 

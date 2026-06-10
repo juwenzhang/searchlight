@@ -10,16 +10,28 @@ wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/se
 
 cat > pkg/package.json <<'JSON'
 {
-  "name": "searchlight",
+  "name": "@luhanxin/searchlight",
   "version": "0.1.0",
+  "description": "Searchlight WebAssembly package for browser and React/Vite local search.",
+  "license": "MIT",
   "type": "module",
+  "sideEffects": false,
   "module": "searchlight.js",
   "types": "searchlight.d.ts",
+  "exports": {
+    ".": {
+      "types": "./searchlight.d.ts",
+      "import": "./searchlight.js"
+    }
+  },
   "files": [
     "searchlight.js",
     "searchlight_bg.wasm",
     "searchlight.d.ts"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
 JSON
 

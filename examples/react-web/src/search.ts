@@ -1,4 +1,4 @@
-import init, { SearchEngine } from 'searchlight';
+import init, { SearchEngine } from '@luhanxin/searchlight';
 import { documents, toSearchText, type DemoDocument } from './data';
 
 export type SearchOptions = {

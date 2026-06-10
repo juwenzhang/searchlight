@@ -12,6 +12,8 @@
 - 拼音搜索：`pinyin:beijing` / `py:bj`
 - 高亮片段、批量检索、自动补全
 - 双模式接入：Rust 服务端模式 + React WASM 本地模式
+- 可复用 React hooks 包：`@luhanxin/searchlight-react`
+- GitHub Actions CI/CD：自动测试、构建 WASM、构建 hooks、tag 发布 npm
 
 ## 一、安装 WASM 工具
 
@@ -96,7 +98,7 @@ pnpm add pwd
 核心调用：
 
 ```ts
-import { SearchEngine } from 'searchlight';
+import { SearchEngine } from '@luhanxin/searchlight';
 
 const engine = new SearchEngine();
 engine.indexBatch([
@@ -143,4 +145,8 @@ let results = engine.search_with_options(
 );
 ```
 
-更多双模式 React 接入、后端服务接入和索引更新建议见 [`docs/local-search.md`](docs/local-search.md)。
+更多文档：
+
+- 双模式 React 接入、后端服务接入和索引更新建议：[`docs/local-search.md`](docs/local-search.md)
+- 可复用 React hooks 包：[`docs/react-hooks.md`](docs/react-hooks.md)
+- CI/CD 与 npm 发布流程：[`docs/cicd.md`](docs/cicd.md)
