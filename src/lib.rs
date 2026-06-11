@@ -26,18 +26,22 @@
 //! engine.index("Python 是数据科学和 AI 领域的首选语言");
 //!
 //! // 搜索
-//! let results = engine.search("编程语言");
+//! let results = engine.search("编程语言").unwrap();
 //! for r in &results {
 //!     println!("[{}] {}", r.score, r.snippet.as_deref().unwrap_or(&r.document));
 //! }
 //!
 //! // 拼音搜索
-//! let results = engine.search_pinyin("biancheng");
+//! let results = engine.search_pinyin("biancheng").unwrap();
 //!
 //! // 模糊搜索
-//! let results = engine.search_fuzzy("programing", 2);
+//! let results = engine.search_fuzzy("programing", 2).unwrap();
 //! ```
 
+mod cache;
+mod error;
+mod executor;
+mod explain;
 mod fuzzy;
 mod highlighter;
 mod index;
@@ -48,10 +52,12 @@ mod tokenizer;
 #[cfg(feature = "wasm")]
 mod wasm_api;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+use cache::{search_cache_key, SearchCache};
 
 /// A search result containing the matched document and metadata
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SearchResult {
     /// Document ID in the index
@@ -66,6 +72,34 @@ pub struct SearchResult {
     pub match_positions: Vec<(usize, usize)>,
     /// Matched terms
     pub matched_terms: Vec<String>,
+    /// Per-component score breakdown (present when `SearchOptions.explain` is true)
+    pub score_breakdown: Option<crate::rank::ScoreBreakdown>,
+    /// Why this document matched the query (present when `SearchOptions.explain` is true)
+    pub match_reasons: Option<Vec<crate::explain::MatchReason>>,
+}
+
+/// A deterministic related term suggestion derived from already indexed documents.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RelatedSuggestion {
+    /// Suggested term that may refine or continue the current query.
+    pub term: String,
+    /// Aggregated relevance score across top matching documents.
+    pub score: f64,
+    /// Number of indexed documents containing this term.
+    pub doc_frequency: usize,
+    /// Total term frequency across the index.
+    pub total_frequency: usize,
+    /// Top matched document IDs that contributed to this suggestion.
+    pub source_doc_ids: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct RelatedSuggestionAccumulator {
+    score: f64,
+    doc_frequency: usize,
+    total_frequency: usize,
+    source_doc_ids: Vec<usize>,
 }
 
 /// Search options for fine-grained control
@@ -82,6 +116,10 @@ pub struct SearchOptions {
     pub highlight: bool,
     /// Maximum number of results to return
     pub limit: usize,
+    /// Use LRU cache for repeated identical searches (disabled automatically on index changes)
+    pub enable_cache: bool,
+    /// Include per-component score breakdown in each result (for agent explain / debugging)
+    pub explain: bool,
 }
 
 impl Default for SearchOptions {
@@ -92,6 +130,8 @@ impl Default for SearchOptions {
             use_pinyin: false,
             highlight: false,
             limit: 20,
+            enable_cache: true,
+            explain: false,
         }
     }
 }
@@ -105,6 +145,8 @@ pub struct SearchEngine {
     query_parser: QueryParser,
     highlighter: Highlighter,
     pinyin_index: PinyinIndex,
+    cache: SearchCache,
+    index_generation: u64,
 }
 
 impl SearchEngine {
@@ -116,6 +158,8 @@ impl SearchEngine {
             query_parser: QueryParser::new(),
             highlighter: Highlighter::new(),
             pinyin_index: PinyinIndex::new(),
+            cache: SearchCache::new(),
+            index_generation: 0,
         }
     }
 
@@ -127,6 +171,8 @@ impl SearchEngine {
             query_parser: QueryParser::new(),
             highlighter: Highlighter::new(),
             pinyin_index: PinyinIndex::new(),
+            cache: SearchCache::new(),
+            index_generation: 0,
         }
     }
 
@@ -138,7 +184,15 @@ impl SearchEngine {
             query_parser: QueryParser::new(),
             highlighter: Highlighter::with_config(config),
             pinyin_index: PinyinIndex::new(),
+            cache: SearchCache::new(),
+            index_generation: 0,
         }
+    }
+
+    fn invalidate_caches(&mut self) {
+        self.index_generation = self.index_generation.wrapping_add(1);
+        self.cache.clear();
+        self.ranking.invalidate_caches();
     }
 
     // ==================== Indexing ====================
@@ -151,16 +205,9 @@ impl SearchEngine {
     /// let id = engine.index("Hello world from Rust!");
     /// ```
     pub fn index(&mut self, text: &str) -> usize {
-        let tokens = crate::tokenizer::tokenize(text);
-
-        // Update pinyin index for Chinese terms
-        for token in &tokens {
-            if token.kind == crate::tokenizer::TokenKind::Chinese {
-                self.pinyin_index.add_term(&token.text);
-            }
-        }
-
-        self.index.add_document(text)
+        let doc_id = self.index_document(text);
+        self.invalidate_caches();
+        doc_id
     }
 
     /// Batch index multiple documents. Returns assigned document IDs.
@@ -179,12 +226,35 @@ impl SearchEngine {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        texts.into_iter().map(|t| self.index(t.as_ref())).collect()
+        let ids: Vec<usize> = texts
+            .into_iter()
+            .map(|t| self.index_document(t.as_ref()))
+            .collect();
+        if !ids.is_empty() {
+            self.invalidate_caches();
+        }
+        ids
+    }
+
+    fn index_document(&mut self, text: &str) -> usize {
+        let tokens = crate::tokenizer::tokenize(text);
+
+        for token in &tokens {
+            if token.kind == crate::tokenizer::TokenKind::Chinese {
+                self.pinyin_index.add_term(&token.text);
+            }
+        }
+
+        self.index.add_document(text)
     }
 
     /// Remove a document from the index
     pub fn remove(&mut self, doc_id: usize) -> bool {
-        self.index.remove_document(doc_id)
+        let removed = self.index.remove_document(doc_id);
+        if removed {
+            self.invalidate_caches();
+        }
+        removed
     }
 
     /// Get the total number of documents in the index
@@ -209,147 +279,149 @@ impl SearchEngine {
     /// engine.index("Rust 是一门现代系统编程语言");
     /// engine.index("Python 是数据科学领域的语言");
     ///
-    /// let results = engine.search("编程语言");
+    /// let results = engine.search("编程语言").unwrap();
     /// assert!(!results.is_empty());
     /// ```
-    pub fn search(&self, query: &str) -> Vec<SearchResult> {
+    pub fn search(&self, query: &str) -> crate::error::Result<Vec<SearchResult>> {
         self.search_with_options(query, &SearchOptions::default())
     }
 
     /// Search with custom options
-    pub fn search_with_options(&self, query: &str, options: &SearchOptions) -> Vec<SearchResult> {
+    pub fn search_with_options(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+    ) -> crate::error::Result<Vec<SearchResult>> {
         const MAX_QUERY_CHARS: usize = 512;
         const MAX_QUERY_TERMS: usize = 64;
-        const MAX_CANDIDATES: usize = 10_000;
-        const MAX_FUZZY_TERMS_SCAN: usize = 5_000;
 
-        if query.chars().count() > MAX_QUERY_CHARS {
-            return vec![];
+        let query_len = query.chars().count();
+        if query_len > MAX_QUERY_CHARS {
+            return Err(crate::error::SearchlightError::QueryTooLong {
+                max: MAX_QUERY_CHARS,
+                actual: query_len,
+            });
+        }
+
+        if options.enable_cache {
+            let key = search_cache_key(self.index_generation, query, options);
+            if let Some(cached) = self.cache.get_results(key) {
+                return Ok(cached);
+            }
         }
 
         let parsed = self.query_parser.parse(query);
 
         // Collect included terms and excluded (NOT) terms separately
-        let mut include_terms = self.collect_include_terms(&parsed.root);
-        let mut exclude_terms = self.collect_exclude_terms(&parsed.root);
-        include_terms.truncate(MAX_QUERY_TERMS);
-        exclude_terms.truncate(MAX_QUERY_TERMS);
+        let include_terms = self.collect_include_terms(&parsed.root);
+        let exclude_terms = self.collect_exclude_terms(&parsed.root);
+        if include_terms.len() > MAX_QUERY_TERMS || exclude_terms.len() > MAX_QUERY_TERMS {
+            return Err(crate::error::SearchlightError::TooManyTerms {
+                max: MAX_QUERY_TERMS,
+            });
+        }
 
         if include_terms.is_empty() && !options.use_pinyin && !parsed.use_pinyin {
-            return vec![];
+            return Ok(vec![]);
         }
 
-        // --- Determine candidate documents ---
-        let mut candidates: HashSet<usize> = HashSet::new();
+        let phrases = self.collect_phrases(&parsed.root);
+
+        let exec_ctx = crate::executor::ExecutorContext {
+            index: &self.index,
+            pinyin_index: &self.pinyin_index,
+            cache: &self.cache,
+            index_generation: self.index_generation,
+            options,
+            parsed: &parsed,
+            query,
+            limits: crate::executor::ExecutorLimits::default(),
+        };
+
+        let evaluation = crate::executor::QueryExecutor::evaluate(&exec_ctx, &parsed.root);
+        let ast_candidates = evaluation.candidates.clone();
+        let mut candidates = evaluation.candidates;
+        let pinyin_candidates = if options.use_pinyin || parsed.use_pinyin {
+            crate::executor::QueryExecutor::pinyin_candidates(&exec_ctx, query)
+        } else {
+            HashSet::new()
+        };
 
         if options.use_pinyin || parsed.use_pinyin {
-            let pinyin_results = self.pinyin_index.search_by_pinyin_detailed(query);
-            for chinese_term in pinyin_results.keys() {
-                if let Some(postings) = self.index.posting_list(chinese_term) {
-                    for p in postings {
-                        if candidates.len() >= MAX_CANDIDATES {
-                            break;
-                        }
-                        candidates.insert(p.doc_id);
-                    }
-                }
-            }
+            candidates.extend(&pinyin_candidates);
         }
 
-        for term in &include_terms {
-            if candidates.len() >= MAX_CANDIDATES {
-                break;
-            }
-            if let Some(postings) = self.index.posting_list(term) {
-                for p in postings {
-                    if candidates.len() >= MAX_CANDIDATES {
-                        break;
-                    }
-                    candidates.insert(p.doc_id);
-                }
-            }
-        }
-
-        // Fuzzy expansion — bounded scan and bounded result expansion
         let mut expanded_terms = include_terms.clone();
-        let mut fuzzy_terms: HashSet<String> = HashSet::new();
-
-        if options.fuzzy {
-            let all_terms = self
-                .index
-                .terms_with_prefix_limited("", MAX_FUZZY_TERMS_SCAN);
-            for term in &include_terms {
-                let fuzzy_results =
-                    fuzzy::fuzzy_match_limited(term, &all_terms, options.max_edit_distance, 32);
-                for fm in &fuzzy_results {
-                    if fuzzy_terms.len() >= MAX_QUERY_TERMS {
-                        break;
-                    }
-                    fuzzy_terms.insert(fm.term.clone());
-                    if let Some(postings) = self.index.posting_list(&fm.term) {
-                        for p in postings {
-                            if candidates.len() >= MAX_CANDIDATES {
-                                break;
-                            }
-                            candidates.insert(p.doc_id);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Merge expanded fuzzy terms into scoring terms
-        for ft in &fuzzy_terms {
+        for ft in &evaluation.fuzzy_terms {
             if !expanded_terms.contains(ft) {
                 expanded_terms.push(ft.clone());
             }
         }
 
-        // --- Build exclude set ---
-        let mut exclude_docs: HashSet<usize> = HashSet::new();
-        for term in &exclude_terms {
-            if let Some(postings) = self.index.posting_list(term) {
-                for p in postings {
-                    exclude_docs.insert(p.doc_id);
-                }
-            }
-        }
-
-        // --- Score and filter candidates ---
-        let mut results: Vec<SearchResult> = Vec::new();
-        let scoring_terms: &[String] = if options.fuzzy {
-            &expanded_terms
+        let scoring_terms: Vec<String> = if options.fuzzy {
+            expanded_terms
         } else {
-            &include_terms
+            include_terms.clone()
         };
 
-        for &doc_id in &candidates {
-            // Skip documents that match exclude terms
-            if exclude_docs.contains(&doc_id) {
-                continue;
-            }
+        let mut results: Vec<SearchResult> = Vec::new();
 
-            let score = if options.use_pinyin || parsed.use_pinyin {
-                let bm25 = self.ranking.bm25_score(&self.index, doc_id, scoring_terms);
-                let mut pinyin_bonus = 0.0;
-                let doc_text = self.index.document(doc_id).unwrap_or("");
-                if pinyin_matches(query, doc_text) {
-                    pinyin_bonus = 2.0;
-                }
-                bm25 + pinyin_bonus
-            } else {
-                self.ranking
-                    .combined_score(&self.index, doc_id, scoring_terms)
+        for &doc_id in &candidates {
+            let doc_text = self.index.document(doc_id).unwrap_or("");
+            let use_pinyin = options.use_pinyin || parsed.use_pinyin;
+            let scoring_input = crate::rank::ScoringInput {
+                query_terms: &scoring_terms,
+                phrases: &phrases,
+                pinyin_query: if use_pinyin { Some(query) } else { None },
+                use_pinyin,
             };
+            let breakdown = self.ranking.score_document(
+                &self.index,
+                doc_id,
+                &scoring_input,
+                use_pinyin && pinyin_matches(query, doc_text),
+            );
+            let score = breakdown.total;
 
             if score > 0.0 {
                 let (matched_terms, match_positions) =
-                    self.get_match_info(doc_id, scoring_terms, options);
+                    self.get_match_info(doc_id, &scoring_terms, options);
 
                 let snippet = if options.highlight {
                     self.highlighter
-                        .highlight(&self.index, doc_id, scoring_terms)
+                        .highlight(&self.index, doc_id, &scoring_terms)
                         .map(|s| s.highlighted)
+                } else {
+                    None
+                };
+
+                let match_reasons = if options.explain {
+                    let mut reasons =
+                        crate::explain::explain_document(&exec_ctx, &parsed.root, doc_id);
+                    if pinyin_candidates.contains(&doc_id) && !ast_candidates.contains(&doc_id) {
+                        reasons.push(crate::explain::MatchReason::pinyin(query));
+                    } else if use_pinyin && pinyin_matches(query, doc_text) {
+                        reasons.push(crate::explain::MatchReason::pinyin(query));
+                    }
+                    if breakdown.phrase > 0.0 {
+                        reasons.push(crate::explain::MatchReason::score_component(
+                            "phrase",
+                            breakdown.phrase,
+                        ));
+                    }
+                    if breakdown.proximity > 0.0 {
+                        reasons.push(crate::explain::MatchReason::score_component(
+                            "proximity",
+                            breakdown.proximity,
+                        ));
+                    }
+                    if breakdown.coverage > 0.0 {
+                        reasons.push(crate::explain::MatchReason::score_component(
+                            "coverage",
+                            breakdown.coverage,
+                        ));
+                    }
+                    Some(reasons)
                 } else {
                     None
                 };
@@ -361,6 +433,12 @@ impl SearchEngine {
                     snippet,
                     match_positions,
                     matched_terms,
+                    score_breakdown: if options.explain {
+                        Some(breakdown)
+                    } else {
+                        None
+                    },
+                    match_reasons,
                 });
             }
         }
@@ -372,7 +450,13 @@ impl SearchEngine {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results.truncate(options.limit);
-        results
+
+        if options.enable_cache {
+            let key = search_cache_key(self.index_generation, query, options);
+            self.cache.put_results(key, results.clone());
+        }
+
+        Ok(results)
     }
 
     /// Batch search: execute multiple queries and return results for each.
@@ -383,13 +467,13 @@ impl SearchEngine {
     /// engine.index("Rust 编程语言");
     /// engine.index("Python 数据科学");
     ///
-    /// let batch = engine.batch_search(["Rust", "Python", "Java"]);
+    /// let batch = engine.batch_search(["Rust", "Python", "Java"]).unwrap();
     /// assert_eq!(batch.len(), 3);
     /// // batch[0] = results for "Rust"
     /// // batch[1] = results for "Python"
     /// // batch[2] = results for "Java"
     /// ```
-    pub fn batch_search<I, S>(&self, queries: I) -> Vec<Vec<SearchResult>>
+    pub fn batch_search<I, S>(&self, queries: I) -> crate::error::Result<Vec<Vec<SearchResult>>>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -405,7 +489,7 @@ impl SearchEngine {
         &self,
         queries: I,
         options: &SearchOptions,
-    ) -> Vec<Vec<SearchResult>>
+    ) -> crate::error::Result<Vec<Vec<SearchResult>>>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -429,7 +513,7 @@ impl SearchEngine {
     /// // Search "biancheng" (programming in pinyin)
     /// let results = engine.search_pinyin("biancheng");
     /// ```
-    pub fn search_pinyin(&self, pinyin_query: &str) -> Vec<SearchResult> {
+    pub fn search_pinyin(&self, pinyin_query: &str) -> crate::error::Result<Vec<SearchResult>> {
         let options = SearchOptions {
             use_pinyin: true,
             highlight: false,
@@ -449,7 +533,11 @@ impl SearchEngine {
     /// // "progamming" is misspelled, but fuzzy match finds "programming"
     /// let results = engine.search_fuzzy("progamming", 2);
     /// ```
-    pub fn search_fuzzy(&self, query: &str, max_distance: usize) -> Vec<SearchResult> {
+    pub fn search_fuzzy(
+        &self,
+        query: &str,
+        max_distance: usize,
+    ) -> crate::error::Result<Vec<SearchResult>> {
         let options = SearchOptions {
             fuzzy: true,
             max_edit_distance: max_distance,
@@ -468,7 +556,7 @@ impl SearchEngine {
     ///
     /// let results = engine.search_phrase("Rust programming");
     /// ```
-    pub fn search_phrase(&self, phrase: &str) -> Vec<SearchResult> {
+    pub fn search_phrase(&self, phrase: &str) -> crate::error::Result<Vec<SearchResult>> {
         self.search(&format!("\"{}\"", phrase))
     }
 
@@ -524,6 +612,93 @@ impl SearchEngine {
         suggestions
     }
 
+    /// Suggest related terms for a full query based on top matched documents.
+    ///
+    /// This is a deterministic retrieval primitive for "next query" / refinement UI:
+    /// it does not generate new language, it ranks existing indexed terms that co-occur
+    /// with the query in relevant documents.
+    pub fn suggest_related(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> crate::error::Result<Vec<RelatedSuggestion>> {
+        if limit == 0 || query.trim().is_empty() {
+            return Ok(vec![]);
+        }
+
+        let parsed = self.query_parser.parse(query);
+        let mut excluded_terms: HashSet<String> = self
+            .collect_include_terms(&parsed.root)
+            .into_iter()
+            .collect();
+        for token in crate::tokenizer::tokenize(query) {
+            excluded_terms.insert(token.text);
+        }
+
+        let search_limit = limit.saturating_mul(3).clamp(10, 50);
+        let options = SearchOptions {
+            fuzzy: true,
+            max_edit_distance: 2,
+            use_pinyin: true,
+            highlight: false,
+            limit: search_limit,
+            enable_cache: true,
+            explain: false,
+        };
+        let hits = self.search_with_options(query, &options)?;
+        let total_docs = self.index.doc_count() as f64;
+        let mut suggestions: HashMap<String, RelatedSuggestionAccumulator> = HashMap::new();
+
+        for hit in hits {
+            let Some(term_freqs) = self.index.document_term_frequencies(hit.doc_id) else {
+                continue;
+            };
+
+            for (term, term_frequency) in term_freqs {
+                if excluded_terms.contains(term) || !is_related_suggestion_term(term) {
+                    continue;
+                }
+
+                let stats = self.index.term_stats(term).cloned().unwrap_or_default();
+                let doc_frequency = stats.doc_frequency.max(1);
+                let idf = ((total_docs + 1.0) / (doc_frequency as f64 + 1.0)).ln() + 1.0;
+                let contribution = hit.score * (1.0 + *term_frequency as f64).ln() * idf;
+                if contribution <= 0.0 {
+                    continue;
+                }
+
+                let entry = suggestions.entry(term.clone()).or_default();
+                entry.score += contribution;
+                entry.doc_frequency = stats.doc_frequency;
+                entry.total_frequency = stats.total_frequency;
+                if !entry.source_doc_ids.contains(&hit.doc_id) && entry.source_doc_ids.len() < 5 {
+                    entry.source_doc_ids.push(hit.doc_id);
+                }
+            }
+        }
+
+        let mut suggestions: Vec<RelatedSuggestion> = suggestions
+            .into_iter()
+            .map(|(term, acc)| RelatedSuggestion {
+                term,
+                score: acc.score,
+                doc_frequency: acc.doc_frequency,
+                total_frequency: acc.total_frequency,
+                source_doc_ids: acc.source_doc_ids,
+            })
+            .collect();
+
+        suggestions.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.doc_frequency.cmp(&a.doc_frequency))
+                .then_with(|| a.term.cmp(&b.term))
+        });
+        suggestions.truncate(limit);
+        Ok(suggestions)
+    }
+
     // ==================== Utility ====================
 
     /// Get all document IDs in the index
@@ -535,6 +710,13 @@ impl SearchEngine {
     pub fn clear(&mut self) {
         self.index = InvertedIndex::new();
         self.pinyin_index = PinyinIndex::new();
+        self.invalidate_caches();
+    }
+
+    /// Clear LRU caches without modifying the index.
+    pub fn clear_cache(&self) {
+        self.cache.clear();
+        self.ranking.invalidate_caches();
     }
 
     /// Get term frequency statistics
@@ -545,6 +727,27 @@ impl SearchEngine {
     }
 
     // ==================== Internal Helpers ====================
+
+    fn collect_phrases(&self, op: &QueryOp) -> Vec<Vec<String>> {
+        let mut phrases = Vec::new();
+        self.collect_phrases_recursive(op, &mut phrases);
+        phrases
+    }
+
+    fn collect_phrases_recursive(&self, op: &QueryOp, phrases: &mut Vec<Vec<String>>) {
+        match op {
+            QueryOp::Phrase(terms) if terms.len() >= 2 => {
+                phrases.push(terms.clone());
+            }
+            QueryOp::And(children) | QueryOp::Or(children) => {
+                for child in children {
+                    self.collect_phrases_recursive(child, phrases);
+                }
+            }
+            QueryOp::Not(child) => self.collect_phrases_recursive(child, phrases),
+            _ => {}
+        }
+    }
 
     /// Collect included terms (NOT terms are excluded)
     fn collect_include_terms(&self, op: &QueryOp) -> Vec<String> {
@@ -697,12 +900,36 @@ impl SearchEngine {
     }
 }
 
+fn is_related_suggestion_term(term: &str) -> bool {
+    let trimmed = term.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_punctuation() || c.is_whitespace())
+    {
+        return false;
+    }
+
+    let char_count = trimmed.chars().count();
+    if char_count == 1 && trimmed.is_ascii() {
+        return false;
+    }
+
+    true
+}
+
 impl Default for SearchEngine {
     fn default() -> Self {
         Self::new()
     }
 }
 
+pub use error::{Result as SearchlightResult, SearchlightError};
+pub use executor::{ExecutorContext, ExecutorLimits, QueryEvaluation, QueryExecutor};
+pub use explain::{explain_document, MatchReason};
 pub use fuzzy::{
     damerau_levenshtein, fuzzy_match, fuzzy_match_limited, fuzzy_match_with_prefix, is_fuzzy_match,
     jaccard_similarity, lcs_similarity, levenshtein_distance, FuzzyMatch,
@@ -711,7 +938,7 @@ pub use highlighter::{Highlighter, HighlighterConfig, Snippet};
 pub use index::InvertedIndex;
 pub use pinyin::{pinyin_matches, PinyinConverter, PinyinIndex};
 pub use query::{ParsedQuery, QueryOp, QueryParser};
-pub use rank::{Bm25Params, Ranker};
+pub use rank::{Bm25Params, Ranker, ScoreBreakdown, ScoringInput};
 pub use tokenizer::{
     contains_chinese, tokenize, tokenize_chars, tokenize_ngrams, Token, TokenKind,
 };
@@ -730,7 +957,7 @@ mod tests {
         engine.index("Go 语言也很流行");
         engine.index("Python 是数据科学领域的首选语言");
 
-        let results = engine.search("编程语言");
+        let results = engine.search("编程语言").unwrap();
         println!("Results: {:?}", results);
         assert!(!results.is_empty());
     }
@@ -742,7 +969,7 @@ mod tests {
         engine.index("上海是一个国际化大都市");
         engine.index("北京是中国的首都");
 
-        let results = engine.search("北京");
+        let results = engine.search("北京").unwrap();
         println!("Results: {:?}", results);
         assert_eq!(results.len(), 2);
     }
@@ -754,10 +981,9 @@ mod tests {
         engine.index("Python is easy to learn");
         engine.index("Rust is memory safe");
 
-        // AND query
-        let results = engine.search("Rust AND Python");
+        let results = engine.search("Rust AND Python").unwrap();
         println!("Results: {:?}", results);
-        assert!(!results.is_empty());
+        assert_eq!(results.len(), 1);
         assert!(results[0].document.contains("Rust"));
         assert!(results[0].document.contains("Python"));
     }
@@ -769,7 +995,7 @@ mod tests {
         engine.index("Python programming language");
         engine.index("JavaScript programming language");
 
-        let results = engine.search("programming -Python");
+        let results = engine.search("programming -Python").unwrap();
         println!("Results: {:?}", results);
         // Should exclude the document with "Python"
         for r in &results {
@@ -784,7 +1010,7 @@ mod tests {
         engine.index("Python data science");
         engine.index("Go concurrent programming");
 
-        let batch = engine.batch_search(["rust", "python", "java"]);
+        let batch = engine.batch_search(["rust", "python", "java"]).unwrap();
         println!("Batch results: {:?}", batch);
         assert_eq!(batch.len(), 3);
         assert!(!batch[0].is_empty()); // "rust" finds something
@@ -798,7 +1024,7 @@ mod tests {
         engine.index("programming in Rust");
         engine.index("writing Python code");
 
-        let results = engine.search_fuzzy("programing", 2);
+        let results = engine.search_fuzzy("programing", 2).unwrap();
         assert!(!results.is_empty());
     }
 
@@ -808,7 +1034,7 @@ mod tests {
         engine.index("编程语言 Rust 很强大");
         engine.index("Python 数据分析");
 
-        let results = engine.search_pinyin("biancheng");
+        let results = engine.search_pinyin("biancheng").unwrap();
         println!("Results: {:?}", results);
         // Should find the document containing "编程"
         assert!(!results.is_empty());
@@ -841,7 +1067,7 @@ mod tests {
         let id = engine.index("temporary document");
         println!("Id: {:?}", id);
         assert!(engine.remove(id));
-        assert!(engine.search("temporary").is_empty());
+        assert!(engine.search("temporary").unwrap().is_empty());
     }
 
     #[test]
@@ -850,7 +1076,7 @@ mod tests {
         engine.index("Rust programming is fun");
         engine.index("Programming in Rust is great");
 
-        let results = engine.search_phrase("Rust programming");
+        let results = engine.search_phrase("Rust programming").unwrap();
         println!("Results: {:?}", results);
         assert!(!results.is_empty());
     }
@@ -864,12 +1090,88 @@ mod tests {
             highlight: true,
             ..SearchOptions::default()
         };
-        let results = engine.search_with_options("编程语言", &options);
+        let results = engine.search_with_options("编程语言", &options).unwrap();
         println!("Results: {:?}", results);
         assert!(!results.is_empty());
         if let Some(snippet) = &results[0].snippet {
             assert!(snippet.contains("<em>"));
         }
+    }
+
+    #[test]
+    fn test_explain_score_breakdown() {
+        let mut engine = SearchEngine::new();
+        engine.index("Rust programming language");
+
+        let options = SearchOptions {
+            explain: true,
+            ..SearchOptions::default()
+        };
+        let results = engine
+            .search_with_options("rust programming", &options)
+            .unwrap();
+        assert!(!results.is_empty());
+        let breakdown = results[0].score_breakdown.as_ref().unwrap();
+        assert!(breakdown.bm25 > 0.0);
+        assert_eq!(breakdown.total, results[0].score);
+
+        let reasons = results[0].match_reasons.as_ref().unwrap();
+        assert!(reasons.iter().any(|r| r.code == "term" || r.code == "and"));
+    }
+
+    #[test]
+    fn test_explain_and_match_reasons() {
+        let mut engine = SearchEngine::new();
+        engine.index("Rust and Python are great");
+        engine.index("Python only");
+
+        let options = SearchOptions {
+            explain: true,
+            ..SearchOptions::default()
+        };
+        let results = engine
+            .search_with_options("Rust AND Python", &options)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        let reasons = results[0].match_reasons.as_ref().unwrap();
+        assert!(reasons.iter().any(|r| r.code == "and"));
+    }
+
+    #[test]
+    fn test_search_cache_hit() {
+        let mut engine = SearchEngine::new();
+        engine.index("cache test document");
+
+        let options = SearchOptions::default();
+        let first = engine.search_with_options("cache", &options).unwrap();
+        let second = engine.search_with_options("cache", &options).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_query_too_long_error() {
+        let engine = SearchEngine::new();
+        let long_query = "a".repeat(600);
+        let err = engine.search(&long_query).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::SearchlightError::QueryTooLong { .. }
+        ));
+    }
+
+    #[test]
+    fn test_suggest_related_terms() {
+        let mut engine = SearchEngine::new();
+        engine.index("React hooks useSearchlight worker search reindex");
+        engine.index("React worker keeps search off the main thread");
+        engine.index("Rust backend BM25 indexing and scoring");
+
+        let suggestions = engine.suggest_related("react search", 5).unwrap();
+        assert!(!suggestions.is_empty());
+        assert!(suggestions.iter().any(|item| item.term == "worker"));
+        assert!(suggestions.iter().all(|item| item.term != "react"));
+        assert!(suggestions.iter().all(|item| item.term != "search"));
+        assert!(suggestions.iter().all(|item| item.score > 0.0));
     }
 
     #[test]

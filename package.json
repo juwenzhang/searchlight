@@ -7,6 +7,8 @@
     "build:wasm": "./scripts/build-react-wasm.sh",
     "build:react-hooks": "pnpm --filter @luhanxin/searchlight-react build",
     "build": "pnpm build:wasm && pnpm build:react-hooks",
-    "typecheck": "pnpm --filter @luhanxin/searchlight-react typecheck"
+    "typecheck": "pnpm --filter @luhanxin/searchlight-react typecheck",
+    "release:sync": "node scripts/release-version.mjs sync",
+    "release:check": "node scripts/release-version.mjs check"
   }
 }

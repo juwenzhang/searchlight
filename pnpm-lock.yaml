@@ -13,6 +13,9 @@ importers:
       '@luhanxin/searchlight':
         specifier: workspace:^
         version: link:../../pkg
+      '@luhanxin/searchlight-react':
+        specifier: workspace:^
+        version: link:../../packages/react-hooks
       react:
         specifier: ^19.2.6
         version: 19.2.7

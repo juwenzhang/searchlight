@@ -1,4 +1,4 @@
-use crate::{SearchEngine as RustSearchEngine, SearchOptions, SearchResult};
+use crate::{SearchEngine as RustSearchEngine, SearchOptions, SearchResult, SearchlightError};
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -9,6 +9,8 @@ struct WasmSearchOptions {
     use_pinyin: bool,
     highlight: bool,
     limit: usize,
+    enable_cache: bool,
+    explain: bool,
 }
 
 impl Default for WasmSearchOptions {
@@ -20,6 +22,8 @@ impl Default for WasmSearchOptions {
             use_pinyin: options.use_pinyin,
             highlight: options.highlight,
             limit: options.limit,
+            enable_cache: options.enable_cache,
+            explain: options.explain,
         }
     }
 }
@@ -32,6 +36,8 @@ impl From<WasmSearchOptions> for SearchOptions {
             use_pinyin: options.use_pinyin,
             highlight: options.highlight,
             limit: options.limit,
+            enable_cache: options.enable_cache,
+            explain: options.explain,
         }
     }
 }
@@ -76,6 +82,11 @@ impl SearchEngine {
         self.inner.clear();
     }
 
+    #[wasm_bindgen(js_name = clearCache)]
+    pub fn clear_cache(&self) {
+        self.inner.clear_cache();
+    }
+
     #[wasm_bindgen(js_name = docCount)]
     pub fn doc_count(&self) -> usize {
         self.inner.doc_count()
@@ -88,39 +99,56 @@ impl SearchEngine {
     }
 
     pub fn search(&self, query: &str) -> Result<JsValue, JsValue> {
-        to_js(&self.inner.search(query))
+        let results = self.inner.search(query).map_err(searchlight_error_to_js)?;
+        to_js(&results)
     }
 
     #[wasm_bindgen(js_name = searchWithOptions)]
     pub fn search_with_options(&self, query: &str, options: JsValue) -> Result<JsValue, JsValue> {
         let options = options_from_js(options)?;
-        to_js(&self.inner.search_with_options(query, &options))
+        let results = self
+            .inner
+            .search_with_options(query, &options)
+            .map_err(searchlight_error_to_js)?;
+        to_js(&results)
     }
 
     #[wasm_bindgen(js_name = batchSearch)]
     pub fn batch_search(&self, queries: JsValue, options: JsValue) -> Result<JsValue, JsValue> {
         let queries: Vec<String> = from_js(queries, "batchSearch expects string[]")?;
         let options = options_from_js(options)?;
-        let results: Vec<Vec<SearchResult>> = queries
+        let results: Result<Vec<Vec<SearchResult>>, SearchlightError> = queries
             .iter()
             .map(|query| self.inner.search_with_options(query, &options))
             .collect();
-        to_js(&results)
+        to_js(&results.map_err(searchlight_error_to_js)?)
     }
 
     #[wasm_bindgen(js_name = searchPinyin)]
     pub fn search_pinyin(&self, query: &str) -> Result<JsValue, JsValue> {
-        to_js(&self.inner.search_pinyin(query))
+        let results = self
+            .inner
+            .search_pinyin(query)
+            .map_err(searchlight_error_to_js)?;
+        to_js(&results)
     }
 
     #[wasm_bindgen(js_name = searchFuzzy)]
     pub fn search_fuzzy(&self, query: &str, max_distance: usize) -> Result<JsValue, JsValue> {
-        to_js(&self.inner.search_fuzzy(query, max_distance))
+        let results = self
+            .inner
+            .search_fuzzy(query, max_distance)
+            .map_err(searchlight_error_to_js)?;
+        to_js(&results)
     }
 
     #[wasm_bindgen(js_name = searchPhrase)]
     pub fn search_phrase(&self, phrase: &str) -> Result<JsValue, JsValue> {
-        to_js(&self.inner.search_phrase(phrase))
+        let results = self
+            .inner
+            .search_phrase(phrase)
+            .map_err(searchlight_error_to_js)?;
+        to_js(&results)
     }
 
     pub fn suggest(&self, prefix: &str) -> Result<JsValue, JsValue> {
@@ -130,6 +158,15 @@ impl SearchEngine {
     #[wasm_bindgen(js_name = suggestWithPinyin)]
     pub fn suggest_with_pinyin(&self, prefix: &str) -> Result<JsValue, JsValue> {
         to_js(&self.inner.suggest_with_pinyin(prefix))
+    }
+
+    #[wasm_bindgen(js_name = suggestRelated)]
+    pub fn suggest_related(&self, query: &str, limit: usize) -> Result<JsValue, JsValue> {
+        let suggestions = self
+            .inner
+            .suggest_related(query, limit)
+            .map_err(searchlight_error_to_js)?;
+        to_js(&suggestions)
     }
 }
 
@@ -156,4 +193,8 @@ where
 {
     serde_wasm_bindgen::to_value(value)
         .map_err(|err| JsValue::from_str(&format!("failed to serialize value: {err}")))
+}
+
+fn searchlight_error_to_js(error: SearchlightError) -> JsValue {
+    JsValue::from_str(&error.to_string())
 }

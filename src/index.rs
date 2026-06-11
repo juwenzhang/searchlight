@@ -213,6 +213,11 @@ impl InvertedIndex {
             .copied()
             .unwrap_or(0)
     }
+
+    /// Get all term frequencies for a specific document.
+    pub fn document_term_frequencies(&self, doc_id: usize) -> Option<&HashMap<String, usize>> {
+        self.doc_term_freqs.get(&doc_id)
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 [package]
 name = "searchlight"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A high-performance full-text search library with Chinese/English support, fuzzy matching, pinyin search, and batch retrieval"
 license = "MIT"
@@ -15,7 +15,9 @@ wasm = ["serde", "dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
 
 [dependencies]
 aho-corasick = "1.1"
+lru = "0.12"
 pinyin = "0.10"
+thiserror = "2"
 unicode-segmentation = "1.12"
 serde = { version = "1", features = ["derive"], optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }

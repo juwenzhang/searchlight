@@ -1,71 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createSearchlightEngine } from './core';
-import { LocalSearchProvider } from './provider';
+import { WorkerSearchProvider, type WorkerSearchProviderOptions } from './worker-provider';
 import type {
-  SearchEngine,
   SearchlightHit,
   SearchlightRelatedSuggestion,
   SearchlightSearchOptions,
   SearchlightStatus,
-  UseSearchlightEngineState,
   UseSearchlightOptions,
-  UseSearchlightState,
+  UseSearchlightWorkerState,
 } from './types';
 
 function toError(error: unknown) {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-export function useSearchlightEngine(options: Pick<UseSearchlightOptions, 'wasmModule' | 'bm25'> = {}): UseSearchlightEngineState {
-  const [status, setStatus] = useState<SearchlightStatus>('idle');
-  const [engine, setEngine] = useState<SearchEngine>();
-  const [error, setError] = useState<Error>();
+export type UseSearchlightWorkerOptions<TDocument = string> = UseSearchlightOptions<TDocument> &
+  Pick<WorkerSearchProviderOptions<TDocument>, 'worker' | 'workerUrl' | 'wasmModuleUrl'>;
 
-  useEffect(() => {
-    let cancelled = false;
-    let nextEngine: SearchEngine | undefined;
-
-    setStatus('loading');
-    setError(undefined);
-
-    createSearchlightEngine(options)
-      .then((createdEngine) => {
-        nextEngine = createdEngine;
-        if (cancelled) {
-          createdEngine.free();
-          return;
-        }
-        setEngine(createdEngine);
-        setStatus('ready');
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(toError(err));
-          setStatus('error');
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      nextEngine?.free();
-      setEngine(undefined);
-    };
-  }, [options]);
-
-  return {
-    status,
-    ready: status === 'ready',
-    loading: status === 'loading',
-    error,
-    engine,
-  };
-}
-
-export function useSearchlight<TDocument = string>(
+export function useSearchlightWorker<TDocument = string>(
   documents: readonly TDocument[],
-  options: UseSearchlightOptions<TDocument> = {},
-): UseSearchlightState<TDocument> {
-  const providerRef = useRef<LocalSearchProvider<TDocument> | undefined>(undefined);
+  options: UseSearchlightWorkerOptions<TDocument> = {},
+): UseSearchlightWorkerState<TDocument> {
+  const providerRef = useRef<WorkerSearchProvider<TDocument> | undefined>(undefined);
   const [status, setStatus] = useState<SearchlightStatus>('idle');
   const [error, setError] = useState<Error>();
   const [query, setQuery] = useState(options.initialQuery ?? '');
@@ -80,18 +35,21 @@ export function useSearchlight<TDocument = string>(
   const search = useCallback(
     (nextQuery = query, searchOptions?: SearchlightSearchOptions) => {
       const provider = providerRef.current;
-      if (!provider?.ready) return [];
+      if (!provider?.ready) return Promise.resolve([]);
 
-      try {
-        const nextResults = provider.search(nextQuery, searchOptions);
-        setResults(nextResults);
-        setError(undefined);
-        return nextResults;
-      } catch (err: unknown) {
-        setError(toError(err));
-        setStatus('error');
-        return [];
-      }
+      return provider
+        .search(nextQuery, searchOptions)
+        .then((nextResults) => {
+          setResults(nextResults);
+          setError(undefined);
+          return nextResults;
+        })
+        .catch((err: unknown) => {
+          const nextError = toError(err);
+          setError(nextError);
+          setStatus('error');
+          return [];
+        });
     },
     [query],
   );
@@ -99,16 +57,18 @@ export function useSearchlight<TDocument = string>(
   const suggest = useCallback(
     (prefix = query) => {
       const provider = providerRef.current;
-      if (!provider?.ready) return [];
+      if (!provider?.ready) return Promise.resolve([]);
 
-      try {
-        const nextSuggestions = provider.suggest(prefix);
-        setSuggestions(nextSuggestions);
-        return nextSuggestions;
-      } catch {
-        setSuggestions([]);
-        return [];
-      }
+      return provider
+        .suggest(prefix)
+        .then((nextSuggestions) => {
+          setSuggestions(nextSuggestions);
+          return nextSuggestions;
+        })
+        .catch(() => {
+          setSuggestions([]);
+          return [];
+        });
     },
     [query],
   );
@@ -116,16 +76,18 @@ export function useSearchlight<TDocument = string>(
   const suggestRelated = useCallback(
     (nextQuery = query, limit = relatedLimit) => {
       const provider = providerRef.current;
-      if (!provider?.ready) return [];
+      if (!provider?.ready) return Promise.resolve([]);
 
-      try {
-        const nextRelatedSuggestions = provider.suggestRelated(nextQuery, limit);
-        setRelatedSuggestions(nextRelatedSuggestions);
-        return nextRelatedSuggestions;
-      } catch {
-        setRelatedSuggestions([]);
-        return [];
-      }
+      return provider
+        .suggestRelated(nextQuery, limit)
+        .then((nextRelatedSuggestions) => {
+          setRelatedSuggestions(nextRelatedSuggestions);
+          return nextRelatedSuggestions;
+        })
+        .catch(() => {
+          setRelatedSuggestions([]);
+          return [];
+        });
     },
     [query, relatedLimit],
   );
@@ -133,31 +95,35 @@ export function useSearchlight<TDocument = string>(
   const reindex = useCallback(
     (nextDocuments: readonly TDocument[]) => {
       const provider = providerRef.current;
-      if (!provider?.ready) return;
-      provider.reindex(nextDocuments);
-      search(query);
-      if (enableRelated) suggestRelated(query);
+      if (!provider?.ready) return Promise.resolve();
+      return provider.reindex(nextDocuments).then(() => {
+        void search(query);
+        if (enableRelated) void suggestRelated(query);
+      });
     },
     [enableRelated, query, search, suggestRelated],
   );
 
   const clear = useCallback(() => {
     const provider = providerRef.current;
-    if (!provider?.ready) return;
-    provider.clear();
-    setResults([]);
-    setSuggestions([]);
-    setRelatedSuggestions([]);
+    if (!provider?.ready) return Promise.resolve();
+    return provider.clear().then(() => {
+      setResults([]);
+      setSuggestions([]);
+      setRelatedSuggestions([]);
+    });
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    const provider = new LocalSearchProvider<TDocument>({
+    const provider = new WorkerSearchProvider<TDocument>({
       documents,
       getText: options.getText,
-      wasmModule: options.wasmModule,
       bm25: options.bm25,
       searchOptions: options.searchOptions,
+      worker: options.worker,
+      workerUrl: options.workerUrl,
+      wasmModuleUrl: options.wasmModuleUrl,
     });
 
     providerRef.current = provider;
@@ -189,9 +155,9 @@ export function useSearchlight<TDocument = string>(
 
   useEffect(() => {
     if (status !== 'ready' || !autoSearch) return;
-    search(query);
-    if (enableSuggest) suggest(query);
-    if (enableRelated) suggestRelated(query);
+    void search(query);
+    if (enableSuggest) void suggest(query);
+    if (enableRelated) void suggestRelated(query);
   }, [autoSearch, enableRelated, enableSuggest, query, search, status, suggest, suggestRelated]);
 
   return {

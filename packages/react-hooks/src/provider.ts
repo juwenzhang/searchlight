@@ -3,6 +3,7 @@ import type {
   SearchlightDocumentMapper,
   SearchlightHit,
   SearchlightProviderOptions,
+  SearchlightRelatedSuggestion,
   SearchlightResult,
   SearchlightSearchOptions,
 } from './types';
@@ -14,6 +15,8 @@ export const defaultSearchOptions: Required<SearchlightSearchOptions> = {
   usePinyin: true,
   highlight: true,
   limit: 20,
+  enableCache: true,
+  explain: false,
 };
 
 export function defaultGetText(document: unknown) {
@@ -95,6 +98,12 @@ export class LocalSearchProvider<TDocument = string> {
     const engine = this.getEngine();
     if (!prefix.trim()) return [];
     return (usePinyin ? engine.suggestWithPinyin(prefix) : engine.suggest(prefix)) as string[];
+  }
+
+  suggestRelated(query: string, limit = 10) {
+    const engine = this.getEngine();
+    if (!query.trim() || limit <= 0) return [];
+    return engine.suggestRelated(query, limit) as SearchlightRelatedSuggestion[];
   }
 
   dispose() {

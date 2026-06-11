@@ -14,9 +14,13 @@ fn main() {
         use_pinyin: true,
         highlight: true,
         limit: 10,
+        ..SearchOptions::default()
     };
 
-    for result in engine.search_with_options("bendi sousuo", &options) {
+    for result in engine
+        .search_with_options("bendi sousuo", &options)
+        .unwrap()
+    {
         println!(
             "doc={} score={:.3} text={}",
             result.doc_id,
