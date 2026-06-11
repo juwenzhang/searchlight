@@ -56,11 +56,46 @@ function readCargoVersion() {
   return match[1];
 }
 
+function readCargoPackageName() {
+  const cargoPath = packagePath('Cargo.toml');
+  const content = readFileSync(cargoPath, 'utf8');
+  const match = /^name\s*=\s*"([^"]+)"/m.exec(content);
+  if (!match) fail('Cargo.toml is missing [package] name.');
+  return match[1];
+}
+
+function readCargoLibName() {
+  const cargoPath = packagePath('Cargo.toml');
+  const content = readFileSync(cargoPath, 'utf8');
+  const match = /^\[lib\][\s\S]*?^name\s*=\s*"([^"]+)"/m.exec(content);
+  if (!match) fail('Cargo.toml is missing [lib] name.');
+  return match[1];
+}
+
 function writeCargoVersion(version) {
   const cargoPath = packagePath('Cargo.toml');
   const content = readFileSync(cargoPath, 'utf8');
   const next = content.replace(/^version\s*=\s*"[^"]+"/m, `version = "${version}"`);
   writeFileSync(cargoPath, next);
+}
+
+function readCargoLockVersion() {
+  const lockPath = packagePath('Cargo.lock');
+  if (!existsSync(lockPath)) return undefined;
+  const content = readFileSync(lockPath, 'utf8');
+  const match = /\[\[package\]\]\nname = "luhanxin-searchlight"\nversion = "([^"]+)"/m.exec(content);
+  return match?.[1];
+}
+
+function writeCargoLockVersion(version) {
+  const lockPath = packagePath('Cargo.lock');
+  if (!existsSync(lockPath)) return;
+  const content = readFileSync(lockPath, 'utf8');
+  const next = content.replace(
+    /(\[\[package\]\]\nname = "luhanxin-searchlight"\nversion = ")([^"]+)(")/m,
+    `$1${version}$3`,
+  );
+  writeFileSync(lockPath, next);
 }
 
 function peerRange(version) {
@@ -69,6 +104,7 @@ function peerRange(version) {
 
 function sync(version) {
   writeCargoVersion(version);
+  writeCargoLockVersion(version);
 
   const reactHooks = readJson('packages/react-hooks/package.json');
   reactHooks.version = version;
@@ -93,7 +129,13 @@ function assertEqual(label, actual, expected) {
 }
 
 function check(version) {
+  assertEqual('Cargo.toml package name', readCargoPackageName(), 'luhanxin-searchlight');
+  assertEqual('Cargo.toml lib name', readCargoLibName(), 'searchlight');
   assertEqual('Cargo.toml version', readCargoVersion(), version);
+  const cargoLockVersion = readCargoLockVersion();
+  if (cargoLockVersion !== undefined) {
+    assertEqual('Cargo.lock root package version', cargoLockVersion, version);
+  }
 
   const reactHooks = readJson('packages/react-hooks/package.json');
   assertEqual('packages/react-hooks/package.json version', reactHooks.version, version);

@@ -1,11 +1,26 @@
 [package]
-name = "searchlight"
+name = "luhanxin-searchlight"
+authors = ["luhanxin <juwenzhangjzh@gmail.com>"]
 version = "0.2.0"
 edition = "2021"
-description = "A high-performance full-text search library with Chinese/English support, fuzzy matching, pinyin search, and batch retrieval"
+description = "A lightweight full-text search toolkit with Chinese/English tokenization, BM25 ranking, fuzzy search, pinyin search, highlights, explainable scoring, related suggestions, and WebAssembly support."
 license = "MIT"
+repository = "https://github.com/juwenzhang/searchlight"
+homepage = "https://github.com/juwenzhang/searchlight"
+documentation = "https://docs.rs/luhanxin-searchlight"
+readme = "README.md"
+keywords = ["search", "full-text", "wasm", "pinyin", "bm25"]
+categories = ["text-processing", "wasm"]
+include = [
+    "/Cargo.toml",
+    "/README.md",
+    "/docs/*.md",
+    "/examples/rust_backend.rs",
+    "/src/**/*.rs",
+]
 
 [lib]
+name = "searchlight"
 crate-type = ["cdylib", "rlib"]
 
 [features]

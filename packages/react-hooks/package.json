@@ -1,6 +1,6 @@
 {
   "name": "@luhanxin/searchlight-react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Reusable React hooks for @luhanxin/searchlight WebAssembly local search.",
   "license": "MIT",
   "type": "module",

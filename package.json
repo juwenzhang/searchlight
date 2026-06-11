@@ -8,6 +8,10 @@
     "build:react-hooks": "pnpm --filter @luhanxin/searchlight-react build",
     "build": "pnpm build:wasm && pnpm build:react-hooks",
     "typecheck": "pnpm --filter @luhanxin/searchlight-react typecheck",
+    "test:rust": "cargo test --features serde",
+    "check:wasm": "cargo check --features wasm",
+    "package:crate": "cargo package --list --allow-dirty",
+    "publish:crate:dry-run": "cargo publish --dry-run --allow-dirty",
     "release:sync": "node scripts/release-version.mjs sync",
     "release:check": "node scripts/release-version.mjs check"
   }

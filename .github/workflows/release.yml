@@ -1,4 +1,4 @@
-name: Release npm packages
+name: Release packages
 
 on:
   push:
@@ -43,11 +43,23 @@ jobs:
       - name: Sync package versions from tag
         run: pnpm release:sync "${GITHUB_REF_NAME}"
 
+      - name: Test Rust crate
+        run: pnpm test:rust
+
+      - name: Check WASM feature
+        run: pnpm check:wasm
+
+      - name: Verify crate package
+        run: pnpm publish:crate:dry-run
+
       - name: Build WASM package
         run: pnpm build:wasm
 
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Typecheck React hooks package
+        run: pnpm typecheck
 
       - name: Build React hooks package
         run: pnpm build:react-hooks
@@ -55,12 +67,35 @@ jobs:
       - name: Validate release versions
         run: pnpm release:check "${GITHUB_REF_NAME}"
 
+      - name: Publish Rust crate
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if curl -fsSL "https://crates.io/api/v1/crates/luhanxin-searchlight/${VERSION}" >/dev/null; then
+            echo "luhanxin-searchlight ${VERSION} already exists on crates.io, skipping"
+          else
+            cargo publish --allow-dirty --token "${CRATES_IO_TOKEN}"
+          fi
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+
       - name: Publish WASM package
-        run: pnpm --filter @luhanxin/searchlight publish --access public --no-git-checks
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "@luhanxin/searchlight@${VERSION}" version >/dev/null 2>&1; then
+            echo "@luhanxin/searchlight ${VERSION} already exists on npm, skipping"
+          else
+            pnpm --filter @luhanxin/searchlight publish --access public --no-git-checks
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish React hooks package
-        run: pnpm --filter @luhanxin/searchlight-react publish --access public --no-git-checks
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "@luhanxin/searchlight-react@${VERSION}" version >/dev/null 2>&1; then
+            echo "@luhanxin/searchlight-react ${VERSION} already exists on npm, skipping"
+          else
+            pnpm --filter @luhanxin/searchlight-react publish --access public --no-git-checks
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
